@@ -1,6 +1,7 @@
 import copy
 import numpy as np
 import gym
+import math
 from typing import Tuple
 from scipy.spatial.transform import Rotation as R
 from robo_gym.utils.exceptions import InvalidStateError, RobotServerError
@@ -10,10 +11,10 @@ from robo_gym.envs.simulation_wrapper import Simulation
 from robo_gym.envs.ur.ur_base_env import URBaseEnv
 
 # base, shoulder, elbow, wrist_1, wrist_2, wrist_3
-JOINT_POSITIONS = [0.0, -2.5, 1.5, -1.5, -1.4, 0.0]
+JOINT_POSITIONS =  [-1.57, -0.44, -1.924, -1.575, 1.575, 0] #[0.0, -2.5, 1.5, -1.5, -1.4, 0.0] 
 RANDOM_JOINT_OFFSET = [1.5, 0.25, 0.5, 1.0, 0.4, 3.14]
 # distance to target that need to be reached
-DISTANCE_THRESHOLD = 0.1
+DISTANCE_THRESHOLD = 0.045
 class EndEffectorPositioningUR(URBaseEnv):
     """Universal Robots UR end effector positioning environment.
 
@@ -33,7 +34,7 @@ class EndEffectorPositioningUR(URBaseEnv):
         real_robot (bool): True if the environment is controlling a real robot.
 
     """
-    def __init__(self, rs_address=None, fix_base=False, fix_shoulder=False, fix_elbow=False, fix_wrist_1=False, fix_wrist_2=False, fix_wrist_3=True, ur_model='ur5', rs_state_to_info=True, restrict_wrist_1=True, **kwargs):
+    def __init__(self, rs_address=None, fix_base=False, fix_shoulder=False, fix_elbow=False, fix_wrist_1=False, fix_wrist_2=False, fix_wrist_3=False, ur_model='ur3', rs_state_to_info=True, restrict_wrist_1=False, **kwargs):
         super().__init__(rs_address, fix_base, fix_shoulder, fix_elbow, fix_wrist_1, fix_wrist_2, fix_wrist_3, ur_model, rs_state_to_info)
         
         self.restrict_wrist_1 = restrict_wrist_1
@@ -143,8 +144,6 @@ class EndEffectorPositioningUR(URBaseEnv):
             joint_velocities.append(rs_state[velocity])
         joint_velocities = np.array(joint_velocities)
 
-
-
         # Compose environment state
         state = np.concatenate((target_polar, joint_positions, joint_velocities, target_coord, ee_to_ref_frame_translation, self.previous_action))
 
@@ -182,7 +181,21 @@ class EndEffectorPositioningUR(URBaseEnv):
             'ee_to_ref_rotation_z',
             'ee_to_ref_rotation_w',
 
-            'in_collision'
+            'ee_to_object_translation_x',
+            'ee_to_object_translation_y',
+            'ee_to_object_translation_z',
+            'ee_to_object_rotation_x',
+            'ee_to_object_rotation_y',
+            'ee_to_object_rotation_z',
+            'ee_to_object_rotation_w',
+
+            'ee_to_object_euler_rotation_r',
+            'ee_to_object_euler_rotation_p',
+            'ee_to_object_euler_rotation_y',
+
+            'in_collision',
+            'gripable'
+        
         ]
         return rs_state_keys
 
@@ -299,23 +312,74 @@ class EndEffectorPositioningUR(URBaseEnv):
         ee_coord = np.array([rs_state['ee_to_ref_translation_x'], rs_state['ee_to_ref_translation_y'], rs_state['ee_to_ref_translation_z']])
         euclidean_dist_3d = np.linalg.norm(target_coord - ee_coord)
 
+        # Calculate direction alignment between target z vector and gripper y vector
+        target_z_vector =np.array([[0, 0, 1, 1]])
+        R_r = np.array([[1,0,0],\
+                        [0,math.cos(rs_state['ee_to_object_euler_rotation_r']),-(math.sin(rs_state['ee_to_object_euler_rotation_r']))],\
+                        [0,math.sin(rs_state['ee_to_object_euler_rotation_r']),math.cos(rs_state['ee_to_object_euler_rotation_r'])]])
+
+        R_p = np.array([[math.cos(rs_state['ee_to_object_euler_rotation_p']),0,math.sin(rs_state['ee_to_object_euler_rotation_p'])],\
+                        [0,1,0],\
+                        [-(math.sin(rs_state['ee_to_object_euler_rotation_p'])),0,math.cos(rs_state['ee_to_object_euler_rotation_p'])]])
+
+        R_y = np.array([[math.cos(rs_state['ee_to_object_euler_rotation_y']),-(math.sin(rs_state['ee_to_object_euler_rotation_y'])),0],\
+                        [math.sin(rs_state['ee_to_object_euler_rotation_y']),math.cos(rs_state['ee_to_object_euler_rotation_y']),0],\
+                        [0,0,1]])
+
+        trans = np.array([[rs_state['ee_to_object_translation_x']],[rs_state['ee_to_object_translation_y']],[rs_state['ee_to_object_translation_z']],[1]])
+
+        R = np.dot(np.dot(R_p,R_r),R_y)
+
+        Trans_matrix = np.zeros((4,4))
+        Trans_matrix[:3,:3] = R
+        Trans_matrix[:,3:] = trans
+
+        gripper_y_vector = np.array([[0], [1], [0], [1]])
+        
+        trans_result_vector = np.dot(Trans_matrix,gripper_y_vector)
+
+        orientation_check = np.dot(target_z_vector,trans_result_vector)
+        ori = float(orientation_check)
+
+        # z-axis rewar
+        z_reward = target_coord[2] - ee_coord[2]
+
         # Reward base
-        reward += d_w * euclidean_dist_3d
+        reward += d_w * euclidean_dist_3d - 0.013*abs(ori) - 0.01*abs(z_reward)
+
+        if euclidean_dist_3d <= 0.13:
+            reward = 2
+            print("near the target")
+            
+            if rs_state['gripable']:
+                reward = g_w * 2.5
+                done = True
+                print('gripable')
+                info['final_status'] = 'success'
+                info['target_coord'] = target_coord
+            
+            else:
+                print("need more precision")
+                        
 
         if euclidean_dist_3d <= DISTANCE_THRESHOLD:
-            reward = g_w * 1
+            reward = g_w * 2
             done = True
+            print('success')
             info['final_status'] = 'success'
             info['target_coord'] = target_coord
 
         if rs_state['in_collision']:
             reward = c_w * 1
             done = True
+            print('collision')
             info['final_status'] = 'collision'
             info['target_coord'] = target_coord
+        
 
         elif self.elapsed_steps >= self.max_episode_steps:
             done = True
+            print('exceeded')
             info['final_status'] = 'max_steps_exceeded'
             info['target_coord'] = target_coord
         
@@ -328,7 +392,13 @@ class EndEffectorPositioningUR(URBaseEnv):
             np.array: [x,y,z,alpha,theta,gamma] pose.
 
         """
-        return self.ur.get_random_workspace_pose()
+        x_t = np.random.default_rng().uniform(low= -0.15, high= 0.15)
+        y_t = np.random.default_rng().uniform(low= 0.48, high= 0.68)
+        z_t = np.random.default_rng().uniform(low= 0.1, high= 0.25)
+        print(x_t,y_t)
+        return [x_t, y_t, z_t, 0, 0, 0]
+
+        # return self.ur.get_random_workspace_pose()
 
     def env_action_to_rs_action(self, action) -> np.array:
         """Convert environment action to Robot Server action"""
@@ -353,18 +423,18 @@ class EndEffectorPositioningUR(URBaseEnv):
         
 class EndEffectorPositioningURSim(EndEffectorPositioningUR, Simulation):
     cmd = "roslaunch ur_robot_server ur_robot_server.launch \
-        world_name:=tabletop_sphere50_no_collision.world \
+        world_name:=hri_hand_empty.world \
         reference_frame:=base_link \
         max_velocity_scale_factor:=0.1 \
         action_cycle_rate:=10 \
-        rviz_gui:=false \
+        rviz_gui:=true \
         gazebo_gui:=true \
         objects_controller:=true \
         rs_mode:=1object \
         n_objects:=1.0 \
-        object_0_model_name:=sphere50_no_collision \
+        object_0_model_name:=coke_can \
         object_0_frame:=target"
-    def __init__(self, ip=None, lower_bound_port=None, upper_bound_port=None, gui=False, ur_model='ur5', **kwargs):
+    def __init__(self, ip=None, lower_bound_port=None, upper_bound_port=None, gui=True, ur_model='ur3', **kwargs):
         self.cmd = self.cmd + ' ' + 'ur_model:=' + ur_model
         Simulation.__init__(self, self.cmd, ip, lower_bound_port, upper_bound_port, gui, **kwargs)
         EndEffectorPositioningUR.__init__(self, rs_address=self.robot_server_ip, ur_model=ur_model, **kwargs)

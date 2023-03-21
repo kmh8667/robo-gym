@@ -10,7 +10,7 @@ from robo_gym_server_modules.robot_server.grpc_msgs.python import robot_server_p
 from robo_gym.envs.simulation_wrapper import Simulation
 
 # base, shoulder, elbow, wrist_1, wrist_2, wrist_3
-JOINT_POSITIONS = [0.0, -2.5, 1.5, 0.0, -1.4, 0.0]
+JOINT_POSITIONS = [-1.57, -0.44, -1.924, -0.78321, 1.575, 0.0]
 
 class URBaseEnv(gym.Env):
     """Universal Robots UR base environment.
@@ -34,7 +34,7 @@ class URBaseEnv(gym.Env):
     real_robot = False
     max_episode_steps = 300
 
-    def __init__(self, rs_address=None, fix_base=False, fix_shoulder=False, fix_elbow=False, fix_wrist_1=False, fix_wrist_2=False, fix_wrist_3=True, ur_model='ur5', rs_state_to_info=True, **kwargs):
+    def __init__(self, rs_address=None, fix_base=False, fix_shoulder=False, fix_elbow=False, fix_wrist_1=False, fix_wrist_2=False, fix_wrist_3=True, ur_model='ur3', rs_state_to_info=False, **kwargs):
         self.ur = ur_utils.UR(model=ur_model)
         self.elapsed_steps = 0
 
@@ -119,7 +119,7 @@ class URBaseEnv(gym.Env):
 
         # Check if current position is in the range of the initial joint positions
         for joint in self.joint_positions.keys():
-            if not np.isclose(self.joint_positions[joint], rs_state[joint], atol=0.05):
+            if not np.isclose(self.joint_positions[joint], rs_state[joint], atol=3):
                 raise InvalidStateError('Reset joint positions are not within defined range')
 
         self.rs_state = rs_state
@@ -210,7 +210,7 @@ class URBaseEnv(gym.Env):
         reward = 0
         done = False
         reward, done, info = self.reward(rs_state=rs_state, action=action)
-        if self.rs_state_to_info: info['rs_state'] = self.rs_state
+        #if self.rs_state_to_info: info['rs_state'] = self.rs_state
 
         return state, reward, done, info
 
